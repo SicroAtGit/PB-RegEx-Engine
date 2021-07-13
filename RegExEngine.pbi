@@ -4,9 +4,9 @@ DeclareModule RegEx
   EnableExplicit
   
   Enumeration SpecialSymbols 0 Step -1
-    #Symbol_Move  ; Used for epsilon moves
-    #Symbol_Split ; Used for unions
-    #Symbol_Final ; Used for final state
+    #Symbol_Move  ; Used for NFA epsilon moves
+    #Symbol_Split ; Used for NFA unions
+    #Symbol_Final ; Used for NFA final state
   EndEnumeration
   
   Structure NfaStateStruc
@@ -15,16 +15,28 @@ DeclareModule RegEx
     *nextState2 ; Pointer to the second next NFA state
   EndStructure
   
+  Structure DfaStateStruc
+    Map symbols.i() ; Key is the symbol and the value is the next DFA state
+    isFinalState.i  ; #True if the DFA state is a final state, otherwise #False
+  EndStructure
+  
   Structure RegExEngineStruc
-    *regExString.Character             ; Pointer to the RegEx string
-    List nfaStatesPool.NfaStateStruc() ; Holds all NFA states
-    *initialNfaState                   ; Pointer to the NFA initial state
+    *regExString.Character               ; Pointer to the RegEx string
+    List nfaStatesPool.NfaStateStruc()   ; Holds all NFA states
+    *initialNfaState                     ; Pointer to the NFA initial state
+    Array dfaStatesPool.DfaStateStruc(0) ; Holds all DFA states
   EndStructure
   
   ; Creates a new RegEx engine and returns the pointer to the
   ; `RegExEngineStruc` structure. If an error occurred (RegEx syntax error or
   ; memory could not be allocated) null is returned.
   Declare Create(regExString$)
+  
+  ; Creates a DFA in the RegEx engine from the NFA created by `Create()`.
+  ; `Match()` then always uses the DFA and is much faster.
+  ; Because the NFA is no longer used after this, it is freed by default.
+  ; The freeing can be turned off by setting `freeNfa` to `#False`.
+  Declare CreateDfa(*regExEngine.RegExEngineStruc, freeNfa = #True)
   
   ; Frees the memory of the RegEx engine created by the function `Create`.
   Declare Free(*regExEngine)
@@ -45,6 +57,10 @@ Module RegEx
   Structure NfaStruc
     *startState.NfaStateStruc
     *endState.NfaStateStruc
+  EndStructure
+  
+  Structure EClosureStruc
+    List *nfaStates()
   EndStructure
   
   Declare ParseRegEx(*regExEngine.RegExEngineStruc)
@@ -288,10 +304,6 @@ Module RegEx
     ProcedureReturn *regExEngine
   EndProcedure
   
-  Procedure Free(*regExEngine.RegExEngineStruc)
-    FreeStructure(*regExEngine)
-  EndProcedure
-  
   Procedure AddState(*state.NfaStateStruc, List *states())
     If *state\symbol = #Symbol_Split
       AddState(*state\nextState1, *states())
@@ -304,7 +316,86 @@ Module RegEx
     EndIf
   EndProcedure
   
-  Procedure Match(*regExEngine.RegExEngineStruc, *string.Character)
+  Procedure FindStatesSet(Array eClosures.EClosureStruc(1), List *states())
+    Protected sizeOfArray, dfaState, countOfStates, isFound, result
+    
+    sizeOfArray = ArraySize(eClosures())
+    countOfStates = ListSize(*states())
+    
+    For dfaState = 0 To sizeOfArray
+      
+      isFound = #True
+      
+      If ListSize(eClosures(dfaState)\nfaStates()) <> countOfStates
+        Continue
+      EndIf
+      
+      ResetList(*states())
+      ResetList(eClosures(dfaState)\nfaStates())
+      
+      While NextElement(*states()) And NextElement(eClosures(dfaState)\nfaStates())
+        If eClosures(dfaState)\nfaStates() <> *states()
+          isFound = #False
+          Break
+        EndIf
+      Wend
+      
+      If isFound
+        result = dfaState
+        Break
+      EndIf
+    Next
+    
+    ProcedureReturn result
+  EndProcedure
+  
+  Procedure CreateDfa(*regExEngine.RegExEngineStruc, freeNfa = #True)
+    Protected.EClosureStruc Dim eClosures(0), NewMap symbols()
+    Protected.NfaStateStruc *state
+    Protected sizeOfArray, dfaState, result
+    
+    AddState(*regExEngine\initialNfaState, eClosures(dfaState)\nfaStates())
+    
+    For dfaState = 0 To ArraySize(eClosures())
+      
+      ClearMap(symbols())
+      
+      ForEach eClosures(dfaState)\nfaStates()
+        *state = eClosures(dfaState)\nfaStates()
+        Select *state\symbol
+          Case #Symbol_Final
+            *regExEngine\dfaStatesPool(dfaState)\isFinalState = #True
+          Default
+            AddState(*state\nextState1, symbols(Chr(*state\symbol))\nfaStates())
+        EndSelect
+      Next
+      
+      ForEach symbols()
+        result = FindStatesSet(eClosures(), symbols()\nfaStates())
+        If result
+          *regExEngine\dfaStatesPool(dfaState)\symbols(MapKey(symbols())) = result
+        Else
+          sizeOfArray = ArraySize(eClosures())
+          ReDim eClosures(sizeOfArray + 1)
+          ReDim *regExEngine\dfaStatesPool(sizeOfArray + 1)
+          CopyList(symbols()\nfaStates(), eClosures(sizeOfArray + 1)\nfaStates())
+          *regExEngine\dfaStatesPool(dfaState)\symbols(MapKey(symbols())) = sizeOfArray + 1
+        EndIf
+      Next
+      
+    Next
+    
+    If freeNfa
+      *regExEngine\initialNfaState = 0
+      FreeList(*regExEngine\nfaStatesPool())
+    EndIf
+  EndProcedure
+  
+  Procedure Free(*regExEngine.RegExEngineStruc)
+    FreeStructure(*regExEngine)
+  EndProcedure
+  
+  Procedure NfaMatch(*regExEngine.RegExEngineStruc, *string.Character)
     Protected.NfaStateStruc *state
     Protected matchLength, lastFinalStateMatchLength
     Protected NewList *currentStates(), NewList *nextStates()
@@ -333,6 +424,35 @@ Module RegEx
     ForEver
     
     ProcedureReturn lastFinalStateMatchLength
+  EndProcedure
+  
+  Procedure DfaMatch(*regExEngine.RegExEngineStruc, *string.Character)
+    Protected dfaState, matchLength, lastFinalStateMatchLength
+    
+    While *string\c
+      
+      If Not FindMapElement(*regExEngine\dfaStatesPool(dfaState)\symbols(), Chr(*string\c))
+        Break
+      EndIf
+      dfaState = *regExEngine\dfaStatesPool(dfaState)\symbols()
+      
+      matchLength + 1
+      *string + SizeOf(Character)
+      
+      If *regExEngine\dfaStatesPool(dfaState)\isFinalState
+        lastFinalStateMatchLength = matchLength
+      EndIf
+    Wend
+    
+    ProcedureReturn lastFinalStateMatchLength
+  EndProcedure
+  
+  Procedure Match(*regExEngine.RegExEngineStruc, *string.Character)
+    If MapSize(*regExEngine\dfaStatesPool(0)\symbols())
+      ProcedureReturn DfaMatch(*regExEngine, *string)
+    Else
+      ProcedureReturn NfaMatch(*regExEngine, *string)
+    EndIf
   EndProcedure
   
 EndModule

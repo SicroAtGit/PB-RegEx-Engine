@@ -4,7 +4,9 @@
 
 ## About
 
-This RegEx engine compiles a regular expression into an NFA with epsilon and can execute the NFA against a string. The NFA is built with the [Thompson's construction](https://en.wikipedia.org/wiki/Thompson%27s_construction) and with two extra constructions for `x+` and `x?`.
+This RegEx engine compiles a regular expression into an E-NFA, optionally then into a very fast DFA, and can execute the E-NFA/DFA against a string.
+
+The E-NFA is built with the [Thompson's construction](https://en.wikipedia.org/wiki/Thompson%27s_construction) and with two extra constructions for `x+` and `x?`.
 
 When matching, the RegEx engine matches always the longest match among several possible matches (POSIX-compliant). During this process, no backtracking is required, because all alternations are checked simultaneously.
 
@@ -58,10 +60,18 @@ EndStructure
 ```
 
 ```purebasic
+Structure DfaStateStruc
+  Map symbols.i() ; Key is the symbol and the value is the next DFA state
+  isFinalState.i  ; #True if the DFA state is a final state, otherwise #False
+EndStructure
+```
+
+```purebasic
 Structure RegExEngineStruc
-  *regExString.Character             ; Pointer to the RegEx string
-  List nfaStatesPool.NfaStateStruc() ; Holds all NFA states
-  *initialNfaState                   ; Pointer to the NFA initial state
+  *regExString.Character               ; Pointer to the RegEx string
+  List nfaStatesPool.NfaStateStruc()   ; Holds all NFA states
+  *initialNfaState                     ; Pointer to the NFA initial state
+  Array dfaStatesPool.DfaStateStruc(0) ; Holds all DFA states
 EndStructure
 ```
 
@@ -69,6 +79,9 @@ EndStructure
 
 - `Create(regExString$)`  
 Creates a new RegEx engine and returns the pointer to the `RegExEngineStruc` structure. If an error occurred (RegEx syntax error or memory could not be allocated) null is returned.
+
+- `CreateDfa(*regExEngine, freeNfa = #True)`
+Creates a DFA in the RegEx engine from the NFA created by `Create()`. `Match()` then always uses the DFA and is much faster. Because the NFA is no longer used after this, it is freed by default. The freeing can be turned off by setting `freeNfa` to `#False`.
 
 - `Free(*regExEngine)`  
 Frees the memory of the RegEx engine created by the function `Create()`.
